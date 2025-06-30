@@ -1,0 +1,128 @@
+#!/usr/bin/env python3
+import logging
+from datetime import datetime
+import re
+from dataclasses import dataclass
+from typing import List
+from scapy.all import sniff, IP, TCP, UDP
+import matplotlib.pyplot as plt
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+
+@dataclass
+class NetworkPacket:
+    timestamp: datetime
+    src_ip: str
+    dst_ip: str
+    src_port: int
+    dst_port: int
+    protocol: str
+
+@dataclass
+class Alert:
+    timestamp: datetime
+    severity: str
+    rule_name: str
+    src_ip: str
+    dst_ip: str
+    description: str
+
+class DetectionRule:
+    def __init__(self, name: str, pattern: str, severity: str, description: str):
+        self.name = name
+        self.pattern = re.compile(pattern)
+        self.severity = severity
+        self.description = description
+
+    def matches(self, packet: NetworkPacket) -> bool:
+        data = f"{packet.src_ip}:{packet.src_port}->{packet.dst_ip}:{packet.dst_port}"
+        return bool(self.pattern.search(data))
+
+class NetworkMonitor:
+    def __init__(self, interface='eth0'):
+        self.interface = interface
+        self.rules: List[DetectionRule] = []
+        self.packet_count = 0
+        self.alerts: List[Alert] = []
+        self.setup_default_rules()
+
+    def setup_default_rules(self):
+        self.rules = [
+            DetectionRule("Port Scan", r".*->.*:(22|23|80|443)", "MEDIUM", "Possible port scan"),
+            DetectionRule("SSH Attempt", r".*:22->.*", "HIGH", "SSH connection attempt"),
+        ]
+
+    def parse_packet(self, packet) -> NetworkPacket:
+        if packet.haslayer(IP):
+            ip_layer = packet[IP]
+            protocol = "TCP" if packet.haslayer(TCP) else "UDP" if packet.haslayer(UDP) else "OTHER"
+            src_port = packet[TCP].sport if packet.haslayer(TCP) else packet[UDP].sport if packet.haslayer(UDP) else 0
+            dst_port = packet[TCP].dport if packet.haslayer(TCP) else packet[UDP].dport if packet.haslayer(UDP) else 0
+            return NetworkPacket(
+                timestamp=datetime.now(),
+                src_ip=ip_layer.src,
+                dst_ip=ip_layer.dst,
+                src_port=src_port,
+                dst_port=dst_port,
+                protocol=protocol
+            )
+
+    def analyze_packet(self, packet: NetworkPacket):
+        for rule in self.rules:
+            if rule.matches(packet):
+                alert = Alert(
+                    timestamp=datetime.now(),
+                    severity=rule.severity,
+                    rule_name=rule.name,
+                    src_ip=packet.src_ip,
+                    dst_ip=packet.dst_ip,
+                    description=rule.description
+                )
+                self.handle_alert(alert)
+                self.alerts.append(alert)
+
+    def handle_alert(self, alert: Alert):
+        logging.warning(f"ALERT: {alert.severity} - {alert.rule_name} - {alert.src_ip} -> {alert.dst_ip} - {alert.description}")
+
+    def packet_handler(self, packet):
+        self.packet_count += 1
+        parsed = self.parse_packet(packet)
+        if parsed:
+            self.analyze_packet(parsed)
+        if self.packet_count % 100 == 0:
+            logging.info(f"Processed {self.packet_count} packets")
+
+    def plot_alerts(self):
+        """Plot a bar chart of alert counts by severity."""
+        if not self.alerts:
+            print("No alerts to plot.")
+            return
+        from collections import Counter
+        counts = Counter(alert.severity for alert in self.alerts)
+        severities = list(counts.keys())
+        values = [counts[sev] for sev in severities]
+        plt.bar(severities, values, color='orange')
+        plt.xlabel('Severity')
+        plt.ylabel('Alert Count')
+        plt.title('NIDS Alert Statistics')
+        plt.show()
+
+    def start_monitoring(self):
+        logging.info("Starting NIDS...")
+        sniff(iface=self.interface, prn=self.packet_handler, store=0)
+
+def main():
+    print("Simple Network Intrusion Detection System")
+    monitor = NetworkMonitor()
+    try:
+        monitor.start_monitoring()
+    except KeyboardInterrupt:
+        print("\nStopping NIDS...")
+        monitor.plot_alerts()
+
+if __name__ == "__main__":
+    main()
